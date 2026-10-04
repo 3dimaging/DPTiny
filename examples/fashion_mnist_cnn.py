@@ -82,6 +82,14 @@ for i, row in enumerate(cm):
     print(f"{CLASSES[i][:10]:>12} " + " ".join(f"{v:7d}" for v in row))
 
 # Most confused pair
-np.fill_diagonal(cm, 0)
-i, j = np.unravel_index(cm.argmax(), cm.shape)
-print(f"\nMost confused: '{CLASSES[i]}' predicted as '{CLASSES[j]}' ({cm[i,j]} times)")
+cm_no_diag = cm.copy()
+np.fill_diagonal(cm_no_diag, 0)
+i, j = np.unravel_index(cm_no_diag.argmax(), cm_no_diag.shape)
+print(f"\nMost confused: '{CLASSES[i]}' predicted as '{CLASSES[j]}' ({cm_no_diag[i,j]} times)")
+
+# Accuracy of each class
+print("\nAccuracy of each class:")
+for i, cls in enumerate(CLASSES):
+    correct = cm[i][i]
+    total = cm[i].sum()
+    print(f"{cls:15s}: {correct/total:.4f}")
