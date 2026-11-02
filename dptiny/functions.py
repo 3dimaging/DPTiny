@@ -500,17 +500,29 @@ class Conv2d(Function):
     Weight shape: ``(OC, C, KH, KW)``
     Output shape: ``(N, OC, OH, OW)``
 
-    Only ``stride`` and ``pad`` are supported; dilation and groups are not.
+    Stride, padding, and dilation are supported. Groups are not.
     """
 
     def __init__(
         self,
         stride: Union[int, Tuple[int, int]] = 1,
         pad: Union[int, Tuple[int, int]] = 0,
+        dilation: Union[int, Tuple[int, int]] = 1,
     ):
         super().__init__()
+
         self.stride = utils.pair(stride)
         self.pad = utils.pair(pad)
+        self.dilation = utils.pair(dilation)
+
+        if self.stride[0] < 1 or self.stride[1] < 1:
+            raise ValueError("stride must be >= 1")
+
+        if self.pad[0] < 0 or self.pad[1] < 0:
+            raise ValueError("pad must be >= 0")
+
+        if self.dilation[0] < 1 or self.dilation[1] < 1:
+            raise ValueError("dilation must be >= 1")
 
     def forward(self, x, W):
         N, C, H, W_in = x.shape
@@ -521,9 +533,23 @@ class Conv2d(Function):
             )
         SH, SW = self.stride
         PH, PW = self.pad
+        DH, DW = self.dilation
 
-        OH = (H + 2 * PH - KH) // SH + 1
-        OW = (W_in + 2 * PW - KW) // SW + 1
+        KH_eff = DH * (KH - 1) + 1
+        KW_eff = DW * (KW - 1) + 1
+
+        if H + 2 * PH < KH_eff:
+            raise ValueError(
+                "effective kernel height does not fit inside padded input"
+            )
+
+        if W_in + 2 * PW < KW_eff:
+            raise ValueError(
+                "effective kernel width does not fit inside padded input"
+            )
+
+        OH = (H + 2 * PH - KH_eff) // SH + 1
+        OW = (W_in + 2 * PW - KW_eff) // SW + 1
 
         x_padded = (
             xp.pad(x, ((0, 0), (0, 0), (PH, PH), (PW, PW)), mode="constant")
@@ -531,10 +557,11 @@ class Conv2d(Function):
             else x
         )
 
-        # im2col via sliding windows; subsample for stride.
+        # im2col via effective sliding windows; subsample for stride
+        # and dilation.
         patches = xp.lib.stride_tricks.sliding_window_view(
-            x_padded, (KH, KW), axis=(2, 3)
-        )[:, :, ::SH, ::SW, :, :]
+            x_padded, (KH_eff, KW_eff), axis=(2, 3)
+        )[:, :, ::SH, ::SW, ::DH, ::DW]
 
         # (N, C, OH, OW, KH, KW) -> (N*OH*OW, C*KH*KW)
         col = patches.transpose(0, 2, 3, 1, 4, 5).reshape(
@@ -558,6 +585,7 @@ class Conv2d(Function):
         OC, _, KH, KW = W_data.shape
         SH, SW = self.stride
         PH, PW = self.pad
+        DH, DW = self.dilation
         N, OC, OH, OW = gy.shape
 
         W_col = W_data.reshape(OC, -1)
@@ -585,8 +613,8 @@ class Conv2d(Function):
         kh_idx = xp.arange(KH).reshape(1, 1, 1, 1, KH, 1)
         kw_idx = xp.arange(KW).reshape(1, 1, 1, 1, 1, KW)
 
-        h_idx = oh_idx * SH + kh_idx
-        w_idx = ow_idx * SW + kw_idx
+        h_idx = oh_idx * SH + kh_idx * DH
+        w_idx = ow_idx * SW + kw_idx * DW
 
         xp.add.at(gx_padded, (n_idx, c_idx, h_idx, w_idx), gcol)
 
@@ -791,8 +819,12 @@ def batch_norm(
     return BatchNorm(momentum, eps)(x, gamma, beta, running_mean, running_var)
 
 
-def conv2d(x, W, stride=1, pad=0):
-    return Conv2d(stride=stride, pad=pad)(x, W)
+def conv2d(x, W, stride=1, pad=0, dilation=1):
+    return Conv2d(
+        stride=stride,
+        pad=pad,
+        dilation=dilation,
+    )(x, W)
 
 
 def max_pool2d(x, kernel_size, stride=None, pad=0):
