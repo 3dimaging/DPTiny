@@ -12,35 +12,24 @@ ShapeLike = Union[int, Sequence[int]]
 
 
 def _init_weight(
-    shape: Tuple[int, ...],
-    init_type: str,
-    fan_in: int,
-    dtype=xp.float32,
+    shape: Tuple[int, ...], init_type: str, fan_in: int
 ) -> "xp.ndarray":
-    """Create a weight array using a standard initializer."""
     if init_type == "he":
         scale = xp.sqrt(2.0 / fan_in)
     elif init_type == "xavier":
         scale = xp.sqrt(1.0 / fan_in)
     elif init_type == "xavier_uniform":
         limit = xp.sqrt(6.0 / (fan_in + shape[-1]))
-        return xp.random.uniform(-limit, limit, shape).astype(dtype)
+        return xp.random.uniform(-limit, limit, shape).astype(xp.float32)
     elif init_type == "normal":
         scale = 0.01
     else:
-        raise ValueError(
-            f"unknown init_type {init_type!r}; expected one of "
-            "'he', 'xavier', 'xavier_uniform', 'normal'"
-        )
-    return xp.random.randn(*shape).astype(dtype) * scale
+        scale = 0.01
+    return xp.random.randn(*shape).astype(xp.float32) * scale
 
 
 class Linear(Module):
-    """Fully connected (affine) layer.
-
-    Input shape: ``(N, in_size)``
-    Output shape: ``(N, out_size)``
-    """
+    """Fully connected (affine) layer."""
 
     def __init__(
         self,
@@ -53,10 +42,7 @@ class Linear(Module):
         super().__init__()
         self.in_size = in_size
         self.out_size = out_size
-
-        W_data = _init_weight(
-            (in_size, out_size), init_type, in_size, dtype
-        )
+        W_data = _init_weight((in_size, out_size), init_type, in_size)
         self.W = Parameter(W_data)
         self.b: Optional[Parameter] = (
             None if nobias else Parameter(xp.zeros(out_size, dtype=dtype))
@@ -69,8 +55,17 @@ class Linear(Module):
 class Conv2d(Module):
     """2-D convolution layer.
 
-    Input shape: ``(N, C, H, W)``
-    Output shape: ``(N, out_channels, OH, OW)``
+    Args:
+        in_channels:  Number of input channels.
+        out_channels: Number of output channels.
+        kernel_size:  Kernel height and width (int or (KH, KW)).
+        stride:       Sliding window step (int or (SH, SW)).
+        pad:          Zero-padding on each side (int or (PH, PW)).
+        dilation:     Spacing between kernel taps (int or (DH, DW)).
+                      dilation=1 is identical to the original behaviour.
+        nobias:       If True, no bias term.
+        init_type:    Weight init scheme ("he", "xavier", ...).
+        dtype:        Data type for parameters.
     """
 
     def __init__(
@@ -80,6 +75,7 @@ class Conv2d(Module):
         kernel_size: ShapeLike,
         stride: Union[int, Tuple[int, int]] = 1,
         pad: Union[int, Tuple[int, int]] = 0,
+        dilation: Union[int, Tuple[int, int]] = 1,
         nobias: bool = False,
         init_type: str = "he",
         dtype=xp.float32,
@@ -90,28 +86,32 @@ class Conv2d(Module):
         self.kernel_size = utils.pair(kernel_size)
         self.stride = stride
         self.pad = pad
+        self.dilation = dilation
 
         KH, KW = self.kernel_size
         fan_in = in_channels * KH * KW
-
         W_data = _init_weight(
-            (out_channels, in_channels, KH, KW), init_type, fan_in, dtype
+            (out_channels, in_channels, KH, KW), init_type, fan_in
         )
-        self.W = Parameter(W_data)
+        self.W = Parameter(W_data.astype(dtype))
         self.b: Optional[Parameter] = (
-            None if nobias else Parameter(xp.zeros(out_channels, dtype=dtype))
+            None if nobias
+            else Parameter(xp.zeros(out_channels, dtype=dtype))
         )
 
     def forward(self, x):
-        y = F.conv2d(x, self.W, stride=self.stride, pad=self.pad)
+        y = F.conv2d(
+            x, self.W,
+            stride=self.stride,
+            pad=self.pad,
+            dilation=self.dilation,
+        )
         if self.b is not None:
             y = y + F.reshape(self.b, (1, self.out_channels, 1, 1))
         return y
 
 
 class MaxPool2d(Module):
-    """2-D max pooling layer."""
-
     def __init__(self, kernel_size, stride=None, pad=0):
         super().__init__()
         self.kernel_size = kernel_size
@@ -123,8 +123,6 @@ class MaxPool2d(Module):
 
 
 class AvgPool2d(Module):
-    """2-D average pooling layer."""
-
     def __init__(self, kernel_size, stride=None, pad=0):
         super().__init__()
         self.kernel_size = kernel_size
@@ -136,15 +134,11 @@ class AvgPool2d(Module):
 
 
 class Flatten(Module):
-    """Flatten ``(N, ...)`` inputs to ``(N, -1)``."""
-
     def forward(self, x):
         return F.flatten(x)
 
 
 class Dropout(Module):
-    """Dropout layer active only in training mode."""
-
     def __init__(self, p: float = 0.5):
         super().__init__()
         self.p = p
@@ -154,14 +148,7 @@ class Dropout(Module):
 
 
 class BatchNorm(Module):
-    """Batch normalization over ``(N, C)`` or ``(N, C, H, W)`` inputs."""
-
-    def __init__(
-        self,
-        num_features: int,
-        momentum: float = 0.9,
-        eps: float = 2e-5,
-    ):
+    def __init__(self, num_features: int, momentum: float = 0.9, eps: float = 2e-5):
         super().__init__()
         self.num_features = num_features
         self.momentum = momentum
@@ -177,32 +164,22 @@ class BatchNorm(Module):
 
     def forward(self, x):
         return F.batch_norm(
-            x,
-            self.gamma,
-            self.beta,
-            self.running_mean,
-            self.running_var,
-            momentum=self.momentum,
-            eps=self.eps,
+            x, self.gamma, self.beta,
+            self.running_mean, self.running_var,
+            momentum=self.momentum, eps=self.eps,
         )
 
 
 class ReLU(Module):
-    """ReLU activation as a layer."""
-
     def forward(self, x):
         return F.relu(x)
 
 
 class Sigmoid(Module):
-    """Sigmoid activation as a layer."""
-
     def forward(self, x):
         return F.sigmoid(x)
 
 
 class Tanh(Module):
-    """Tanh activation as a layer."""
-
     def forward(self, x):
         return F.tanh(x)
