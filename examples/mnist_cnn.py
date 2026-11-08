@@ -39,10 +39,10 @@ if is_gpu():
     y_test = to_gpu(y_test)
 
 model = Sequential(
-    Conv2d(1, 16, 3, pad=1),
+    Conv2d(1, 16, 3, pad=2, dilation=2),
     ReLU(),
     MaxPool2d(2),
-    Conv2d(16, 32, 3, pad=1),
+    Conv2d(16, 32, 3, pad=2, dilation=2),
     ReLU(),
     MaxPool2d(2),
     Flatten(),

@@ -7,7 +7,13 @@ x_data = np.random.randn(8, 1, 28, 28).astype(np.float32)
 x = Variable(x_data)
 
 # Conv layer: 1 -> 16 channels, 3x3 kernel, padding=1 to keep spatial size
-conv = Conv2d(in_channels=1, out_channels=16, kernel_size=3, pad=1)
+conv = Conv2d(
+    in_channels=1,
+    out_channels=16,
+    kernel_size=3,
+    pad=2,
+    dilation=2,
+)
 y = conv(x)
 
 print("Input shape:", x.shape)
