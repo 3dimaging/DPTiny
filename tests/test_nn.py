@@ -121,6 +121,39 @@ def test_conv2d_output_shape():
     assert y.shape == (8, 16, 28, 28)
 
 
+def test_conv2d_dilated_output_shape():
+    # A 3x3 kernel dilated by 2 spans 5 pixels, so pad=2 keeps the size.
+    conv = Conv2d(1, 16, 3, pad=2, dilation=2)
+    y = conv(Variable(np.random.randn(8, 1, 28, 28).astype(np.float32)))
+    assert y.shape == (8, 16, 28, 28)
+
+    # Without extra padding the output shrinks by the dilated kernel extent.
+    conv_nopad = Conv2d(1, 4, 3, dilation=2)
+    y2 = conv_nopad(Variable(np.random.randn(2, 1, 28, 28).astype(np.float32)))
+    assert y2.shape == (2, 4, 24, 24)
+
+
+def test_conv2d_dilation_keeps_parameter_count():
+    plain = Conv2d(3, 8, 3, pad=1)
+    dilated = Conv2d(3, 8, 3, pad=3, dilation=3)
+    assert plain.W.shape == dilated.W.shape
+
+
+def test_conv2d_rejects_invalid_arguments():
+    x = Variable(np.random.randn(1, 1, 8, 8).astype(np.float32))
+    for kwargs in (
+        {"stride": 0},
+        {"pad": -1},
+        {"dilation": 0},
+        {"dilation": 9},  # effective kernel larger than the input
+    ):
+        try:
+            Conv2d(1, 1, 3, **kwargs)(x)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {kwargs}")
+
+
 def test_pool_output_shapes():
     x = Variable(np.random.randn(2, 4, 8, 8).astype(np.float32))
     assert MaxPool2d(2)(x).shape == (2, 4, 4, 4)
