@@ -23,11 +23,18 @@ from dptiny.nn import (
 )
 from dptiny.optim import Adam
 
+# Dilation factor for the convolution layers. Set to 1 for ordinary 3x3
+# convolutions. With a 3x3 kernel, padding by the dilation factor keeps the
+# spatial size unchanged, so the Linear layer below stays valid either way.
+DILATION = 2
+
 if is_available():
     use_gpu()
     print("GPU enabled for training.")
 else:
     print("GPU not available; training on CPU.")
+
+print(f"Convolution dilation: {DILATION}")
 
 print("Loading MNIST dataset...")
 X_train, X_test, y_train, y_test = get_mnist(flatten=False)
@@ -39,10 +46,10 @@ if is_gpu():
     y_test = to_gpu(y_test)
 
 model = Sequential(
-    Conv2d(1, 16, 3, pad=1),
+    Conv2d(1, 16, 3, pad=DILATION, dilation=DILATION),
     ReLU(),
     MaxPool2d(2),
-    Conv2d(16, 32, 3, pad=1),
+    Conv2d(16, 32, 3, pad=DILATION, dilation=DILATION),
     ReLU(),
     MaxPool2d(2),
     Flatten(),

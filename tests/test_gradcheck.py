@@ -114,6 +114,28 @@ def test_conv2d_stride2_pad1():
     check(lambda a, w: F.conv2d(a, w, stride=2, pad=1), x, W)
 
 
+def test_conv2d_dilation2():
+    x = np.random.randn(2, 3, 9, 9)
+    W = np.random.randn(4, 3, 3, 3)
+    check(lambda a, w: F.conv2d(a, w, stride=1, pad=2, dilation=2), x, W)
+
+
+def test_conv2d_dilation_stride_pad():
+    x = np.random.randn(2, 3, 11, 11)
+    W = np.random.randn(4, 3, 3, 3)
+    check(lambda a, w: F.conv2d(a, w, stride=2, pad=2, dilation=3), x, W)
+
+
+def test_conv2d_asymmetric_dilation():
+    x = np.random.randn(2, 2, 10, 12)
+    W = np.random.randn(3, 2, 3, 3)
+    check(
+        lambda a, w: F.conv2d(a, w, stride=1, pad=(2, 1), dilation=(3, 2)),
+        x,
+        W,
+    )
+
+
 def test_max_pool2d():
     x = np.random.randn(2, 3, 6, 6)
     check(lambda a: F.max_pool2d(a, 2), x)
