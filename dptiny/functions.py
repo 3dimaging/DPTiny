@@ -150,12 +150,10 @@ class MatMul(Function):
         x, W = self.inputs
         gx = gy @ W.data.T
         gW = x.data.T @ gy
-
         if gx.shape != self.x_shape:
             gx = gx.reshape(self.x_shape)
         if gW.shape != self.W_shape:
             gW = gW.reshape(self.W_shape)
-
         return gx, gW
 
 
@@ -280,9 +278,7 @@ class Max(Function):
         y_b = xp.broadcast_to(y_b, self.x_shape)
         x = self.inputs[0]
         mask = x.data == y_b
-        count = mask.sum(
-            axis=self.axis, keepdims=True
-        )
+        count = mask.sum(axis=self.axis, keepdims=True)
         return gy_b * mask / count
 
 
@@ -359,21 +355,16 @@ class SoftmaxCrossEntropy(Function):
     def forward(self, x, t):
         self.t = t
         self.x_shape = x.shape
-
         batch_size = x.shape[0]
-        if self.t.size == self.t.shape[0]:  # labels are not one-hot
+        if self.t.size == self.t.shape[0]:
             self.t_oh = xp.eye(x.shape[1], dtype=x.dtype)[self.t]
         else:
             self.t_oh = self.t
-
-        # Numerically stable softmax
         x_max = x.max(axis=1, keepdims=True)
         x_shifted = x - x_max
         exp_x = xp.exp(x_shifted)
         sum_exp_x = exp_x.sum(axis=1, keepdims=True)
         self.y = exp_x / sum_exp_x
-
-        # Numerically stable log-softmax
         log_y = x_shifted - xp.log(sum_exp_x)
         batch_log_y = xp.sum(self.t_oh * log_y, axis=1)
         loss = -xp.sum(batch_log_y) / batch_size
@@ -425,12 +416,6 @@ class Dropout(Function):
 
 
 class BatchNorm(Function):
-    """Batch normalization over the batch (and spatial) axes.
-
-    ``running_mean``/``running_var`` are raw arrays updated in place when
-    ``Config.train`` is ``True``.
-    """
-
     def __init__(self, momentum: float = 0.9, eps: float = 2e-5):
         super().__init__()
         self.momentum = momentum
@@ -446,15 +431,12 @@ class BatchNorm(Function):
             bshape = (1, -1, 1, 1)
         else:
             raise ValueError("batch_norm supports 2D or 4D inputs")
-
         gamma_b = gamma.reshape(bshape)
         beta_b = beta.reshape(bshape)
-
         if self.train:
             m = 1
             for a in self.axes:
                 m *= x.shape[a]
-            # Use biased variance for normalization, like the standard BN.
             mean = x.mean(axis=self.axes, keepdims=True)
             var = x.var(axis=self.axes, keepdims=True)
             running_mean[...] = (
@@ -469,7 +451,6 @@ class BatchNorm(Function):
         else:
             mean = running_mean.reshape(bshape)
             var = running_var.reshape(bshape)
-
         self.std = xp.sqrt(var + self.eps)
         self.xhat = (x - mean) / self.std
         self.gamma_b = gamma_b
@@ -484,9 +465,8 @@ class BatchNorm(Function):
             gx = (self.gamma_b / self.std) / self.m * (
                 self.m * gy
                 - gy.sum(axis=self.axes, keepdims=True)
-                - self.xhat * (gxhat * self.xhat).sum(
-                    axis=self.axes, keepdims=True
-                )
+                - self.xhat
+                * (gxhat * self.xhat).sum(axis=self.axes, keepdims=True)
             )
         else:
             gx = gy * self.gamma_b / self.std
@@ -494,23 +474,43 @@ class BatchNorm(Function):
 
 
 class Conv2d(Function):
-    """2-D cross-correlation (convolution) with learnable kernel.
+    """2-D cross-correlation with stride, pad, and dilation support.
 
-    Input shape: ``(N, C, H, W)``
-    Weight shape: ``(OC, C, KH, KW)``
-    Output shape: ``(N, OC, OH, OW)``
+    Input  shape: (N, C, H, W)
+    Weight shape: (OC, C, KH, KW)
+    Output shape: (N, OC, OH, OW)
 
-    Only ``stride`` and ``pad`` are supported; dilation and groups are not.
+    Effective kernel size after dilation::
+
+        KH_eff = DH * (KH - 1) + 1
+        KW_eff = DW * (KW - 1) + 1
+
+    Output spatial size::
+
+        OH = (H + 2*PH - KH_eff) // SH + 1
+        OW = (W + 2*PW - KW_eff) // SW + 1
     """
 
     def __init__(
         self,
         stride: Union[int, Tuple[int, int]] = 1,
         pad: Union[int, Tuple[int, int]] = 0,
+        dilation: Union[int, Tuple[int, int]] = 1,
     ):
         super().__init__()
         self.stride = utils.pair(stride)
         self.pad = utils.pair(pad)
+        self.dilation = utils.pair(dilation)
+
+        SH, SW = self.stride
+        PH, PW = self.pad
+        DH, DW = self.dilation
+        if SH < 1 or SW < 1:
+            raise ValueError("stride must be >= 1")
+        if PH < 0 or PW < 0:
+            raise ValueError("pad must be >= 0")
+        if DH < 1 or DW < 1:
+            raise ValueError("dilation must be >= 1")
 
     def forward(self, x, W):
         N, C, H, W_in = x.shape
@@ -521,9 +521,19 @@ class Conv2d(Function):
             )
         SH, SW = self.stride
         PH, PW = self.pad
+        DH, DW = self.dilation
 
-        OH = (H + 2 * PH - KH) // SH + 1
-        OW = (W_in + 2 * PW - KW) // SW + 1
+        KH_eff = DH * (KH - 1) + 1
+        KW_eff = DW * (KW - 1) + 1
+
+        if KH_eff > H + 2 * PH or KW_eff > W_in + 2 * PW:
+            raise ValueError(
+                f"Effective kernel ({KH_eff}x{KW_eff}) is larger than the "
+                f"padded input ({H + 2*PH}x{W_in + 2*PW})"
+            )
+
+        OH = (H + 2 * PH - KH_eff) // SH + 1
+        OW = (W_in + 2 * PW - KW_eff) // SW + 1
 
         x_padded = (
             xp.pad(x, ((0, 0), (0, 0), (PH, PH), (PW, PW)), mode="constant")
@@ -531,23 +541,28 @@ class Conv2d(Function):
             else x
         )
 
-        # im2col via sliding windows; subsample for stride.
-        patches = xp.lib.stride_tricks.sliding_window_view(
-            x_padded, (KH, KW), axis=(2, 3)
-        )[:, :, ::SH, ::SW, :, :]
+        # Dilated im2col — explicit loop works on both NumPy and CuPy
+        col = xp.empty((N, C, OH, OW, KH, KW), dtype=x.dtype)
+        for kh in range(KH):
+            h_start = kh * DH
+            for kw in range(KW):
+                w_start = kw * DW
+                col[:, :, :, :, kh, kw] = x_padded[
+                    :, :,
+                    h_start : h_start + SH * OH : SH,
+                    w_start : w_start + SW * OW : SW,
+                ]
 
         # (N, C, OH, OW, KH, KW) -> (N*OH*OW, C*KH*KW)
-        col = patches.transpose(0, 2, 3, 1, 4, 5).reshape(
+        col_mat = col.transpose(0, 2, 3, 1, 4, 5).reshape(
             N * OH * OW, C * KH * KW
         )
         W_col = W.reshape(OC, -1)
 
-        out = col @ W_col.T  # (N*OH*OW, OC)
-        out = out.reshape(N, OH, OW, OC).transpose(0, 3, 1, 2)
+        out = (col_mat @ W_col.T).reshape(N, OH, OW, OC).transpose(0, 3, 1, 2)
 
         self.input_shape = x.shape
-        self.col_shape = (N, OH, OW, C, KH, KW)
-        self._col = col
+        self._col = col_mat
         return out
 
     def backward(self, gy):
@@ -558,44 +573,44 @@ class Conv2d(Function):
         OC, _, KH, KW = W_data.shape
         SH, SW = self.stride
         PH, PW = self.pad
-        N, OC, OH, OW = gy.shape
+        DH, DW = self.dilation
+        _, _, OH, OW = gy.shape
 
         W_col = W_data.reshape(OC, -1)
         gy_col = gy.transpose(0, 2, 3, 1).reshape(N * OH * OW, OC)
 
-        # gW = gy_col.T @ col
-        gW_col = gy_col.T @ self._col
-        gW = gW_col.reshape(OC, C, KH, KW)
+        # Gradient w.r.t. W
+        gW = (gy_col.T @ self._col).reshape(OC, C, KH, KW)
 
-        # gx via col2im
-        gcol = gy_col @ W_col  # (N*OH*OW, C*KH*KW)
-        gcol = gcol.reshape(N, OH, OW, C, KH, KW).transpose(0, 3, 1, 2, 4, 5)
-
-        gx_padded = xp.zeros(
-            (N, C, H + 2 * PH, W_in + 2 * PW)
-            if PH > 0 or PW > 0
-            else (N, C, H, W_in),
-            dtype=x_data.dtype,
+        # Gradient w.r.t. x — dilated col2im
+        gcol_mat = gy_col @ W_col
+        gcol = gcol_mat.reshape(N, OH, OW, C, KH, KW).transpose(
+            0, 3, 1, 2, 4, 5
         )
 
-        n_idx = xp.arange(N).reshape(N, 1, 1, 1, 1, 1)
-        c_idx = xp.arange(C).reshape(1, C, 1, 1, 1, 1)
-        oh_idx = xp.arange(OH).reshape(1, 1, OH, 1, 1, 1)
-        ow_idx = xp.arange(OW).reshape(1, 1, 1, OW, 1, 1)
-        kh_idx = xp.arange(KH).reshape(1, 1, 1, 1, KH, 1)
-        kw_idx = xp.arange(KW).reshape(1, 1, 1, 1, 1, KW)
-
-        h_idx = oh_idx * SH + kh_idx
-        w_idx = ow_idx * SW + kw_idx
-
-        xp.add.at(gx_padded, (n_idx, c_idx, h_idx, w_idx), gcol)
+        gx_padded = xp.zeros(
+            (N, C, H + 2 * PH, W_in + 2 * PW), dtype=x_data.dtype
+        )
+        for kh in range(KH):
+            h_start = kh * DH
+            for kw in range(KW):
+                w_start = kw * DW
+                xp.add.at(
+                    gx_padded,
+                    (
+                        slice(None),
+                        slice(None),
+                        slice(h_start, h_start + SH * OH, SH),
+                        slice(w_start, w_start + SW * OW, SW),
+                    ),
+                    gcol[:, :, :, :, kh, kw],
+                )
 
         gx = (
             gx_padded[:, :, PH : H + PH, PW : W_in + PW]
             if PH > 0 or PW > 0
             else gx_padded
         )
-
         return gx, gW
 
 
@@ -665,151 +680,114 @@ class AvgPool2d(Function):
 
 
 # ---------------------------------------------------------------------------
-# Thin wrapper functions
+# Wrapper functions
 # ---------------------------------------------------------------------------
-
 
 def add(x0, x1):
     return Add()(x0, x1)
 
-
 def mul(x0, x1):
     return Mul()(x0, x1)
-
 
 def neg(x):
     return Neg()(x)
 
-
 def sub(x0, x1):
     return Sub()(x0, x1)
-
 
 def div(x0, x1):
     return Div()(x0, x1)
 
-
 def rsub(x0, x1):
     return sub(x1, x0)
-
 
 def rdiv(x0, x1):
     return div(x1, x0)
 
-
 def exp(x):
     return Exp()(x)
-
 
 def log(x):
     return Log()(x)
 
-
 def tanh(x):
     return Tanh()(x)
-
 
 def sigmoid(x):
     return Sigmoid()(x)
 
-
 def relu(x):
     return ReLU()(x)
-
 
 def softmax(x):
     return Softmax()(x)
 
-
 def softmax_cross_entropy(x, t):
     return SoftmaxCrossEntropy()(x, t)
-
 
 def mean_squared_error(x0, x1):
     return MeanSquaredError()(x0, x1)
 
-
 def matmul(x, W):
     return MatMul()(x, W)
-
 
 def linear(x, W, b=None):
     if b is None:
         return Linear()(x, W)
     return Linear()(x, W, b)
 
-
 def pow(x, exponent):
     return Pow(exponent)(x)
-
 
 def reshape(x, shape):
     if x.shape == shape:
         return x if isinstance(x, Variable) else Variable(x)
     return Reshape(shape)(x)
 
-
 def transpose(x, axes=None):
     return Transpose(axes)(x)
-
 
 def sum(x, axis=None, keepdims=False):
     return Sum(axis, keepdims)(x)
 
-
 def mean(x, axis=None, keepdims=False):
     return Mean(axis, keepdims)(x)
 
-
 def max(x, axis=None, keepdims=False):
     return Max(axis, keepdims)(x)
-
 
 def broadcast_to(x, shape):
     if getattr(x, "shape", None) == shape:
         return x if isinstance(x, Variable) else Variable(x)
     return BroadcastTo(shape)(x)
 
-
 def sum_to(x, shape):
     if getattr(x, "shape", None) == shape:
         return x if isinstance(x, Variable) else Variable(x)
     return SumTo(shape)(x)
 
-
 def get_item(x, slices):
     return GetItem(slices)(x)
-
 
 def dropout(x, p=0.5):
     return Dropout(p)(x)
 
-
-def batch_norm(
-    x, gamma, beta, running_mean, running_var, momentum=0.9, eps=2e-5
-):
+def batch_norm(x, gamma, beta, running_mean, running_var, momentum=0.9, eps=2e-5):
     return BatchNorm(momentum, eps)(x, gamma, beta, running_mean, running_var)
 
-
-def conv2d(x, W, stride=1, pad=0):
-    return Conv2d(stride=stride, pad=pad)(x, W)
-
+def conv2d(x, W, stride=1, pad=0, dilation=1):
+    return Conv2d(stride=stride, pad=pad, dilation=dilation)(x, W)
 
 def max_pool2d(x, kernel_size, stride=None, pad=0):
     return MaxPool2d(kernel_size, stride, pad)(x)
 
-
 def avg_pool2d(x, kernel_size, stride=None, pad=0):
     return AvgPool2d(kernel_size, stride, pad)(x)
 
-
 def flatten(x):
-    """Reshape ``(N, ...)`` input to ``(N, -1)``."""
     return reshape(x, (x.shape[0], -1))
 
-
 def accuracy(y, t):
-    """Classification accuracy between predictions ``y`` and labels ``t``."""
     pred = y.data.argmax(axis=1)
     if t.ndim != 1:
         t = t.argmax(axis=1)

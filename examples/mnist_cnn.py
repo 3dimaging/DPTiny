@@ -34,41 +34,52 @@ X_train, X_test, y_train, y_test = get_mnist(flatten=False)
 
 if is_gpu():
     X_train = to_gpu(X_train)
-    X_test = to_gpu(X_test)
+    X_test  = to_gpu(X_test)
     y_train = to_gpu(y_train)
-    y_test = to_gpu(y_test)
+    y_test  = to_gpu(y_test)
 
+# -----------------------------------------------------------------
+# CNN with dilated convolutions (dilation=2).
+#
+# Layer 1: 3x3 kernel, dilation=2 → effective receptive field 5x5.
+#           pad=2 keeps spatial size at 28x28 after the dilated conv.
+# Layer 2: 3x3 kernel, dilation=2 → effective receptive field 5x5.
+#           pad=2 keeps spatial size at 14x14 after the dilated conv.
+# After two MaxPool2d(2) the feature map is 7x7, same as the
+# original model, so the Linear(32*7*7, 128) head is unchanged.
+# -----------------------------------------------------------------
 model = Sequential(
-    Conv2d(1, 16, 3, pad=1),
+    Conv2d(1,  16, 3, pad=2, dilation=2),   # (N,  1, 28, 28) -> (N, 16, 28, 28)
     ReLU(),
-    MaxPool2d(2),
-    Conv2d(16, 32, 3, pad=1),
+    MaxPool2d(2),                             # (N, 16, 28, 28) -> (N, 16, 14, 14)
+    Conv2d(16, 32, 3, pad=2, dilation=2),    # (N, 16, 14, 14) -> (N, 32, 14, 14)
     ReLU(),
-    MaxPool2d(2),
+    MaxPool2d(2),                             # (N, 32, 14, 14) -> (N, 32,  7,  7)
     Flatten(),
     Linear(32 * 7 * 7, 128),
     ReLU(),
     Dropout(0.3),
     Linear(128, 10),
 )
+
 if is_gpu():
     model.to_gpu()
 
 batch_size = 128
-max_epoch = 2
+max_epoch  = 2
 data_loader = DataLoader((X_train, y_train), batch_size)
-test_loader = DataLoader((X_test, y_test), batch_size, shuffle=False)
+test_loader = DataLoader((X_test,  y_test),  batch_size, shuffle=False)
 
 optimizer = Adam(model, lr=0.001)
 
 start_time = time.time()
 for epoch in range(max_epoch):
     sum_loss = 0.0
-    count = 0
+    count    = 0
     model.train()
     for i, (x, t) in enumerate(data_loader):
-        x = Variable(x)
-        y = model(x)
+        x    = Variable(x)
+        y    = model(x)
         loss = softmax_cross_entropy(y, t)
 
         model.cleargrads()
@@ -76,7 +87,7 @@ for epoch in range(max_epoch):
         optimizer.update()
 
         sum_loss += float(loss.data) * len(t)
-        count += len(t)
+        count    += len(t)
 
         if (i + 1) % 50 == 0:
             print(
@@ -85,30 +96,34 @@ for epoch in range(max_epoch):
                 f"time: {time.time() - start_time:.2f}s"
             )
 
+    avg_loss = sum_loss / count
+
     sum_acc = 0.0
-    count = 0
+    count   = 0
     with test_mode(), no_grad():
         for x, t in test_loader:
-            y = model(Variable(x))
+            y    = model(Variable(x))
             pred = y.data.argmax(axis=1)
-            acc = (pred == t).sum() / len(t)
+            acc  = (pred == t).sum() / len(t)
             sum_acc += float(acc) * len(t)
-            count += len(t)
+            count   += len(t)
+
     print(
-        f"epoch: {epoch + 1}, loss: {sum_loss / count:.4f}, "
+        f"epoch: {epoch + 1}, loss: {avg_loss:.4f}, "
         f"test acc: {sum_acc / count:.4f}, "
         f"time: {time.time() - start_time:.2f}s"
     )
 
+# Final evaluation
 sum_acc = 0.0
-count = 0
+count   = 0
 with test_mode(), no_grad():
     for x, t in test_loader:
-        y = model(Variable(x))
+        y    = model(Variable(x))
         pred = y.data.argmax(axis=1)
-        acc = (pred == t).sum() / len(t)
+        acc  = (pred == t).sum() / len(t)
         sum_acc += float(acc) * len(t)
-        count += len(t)
+        count   += len(t)
 
 print(f"\nTraining completed in {time.time() - start_time:.2f} seconds")
 print(f"Final test accuracy: {sum_acc / count:.4f}")
