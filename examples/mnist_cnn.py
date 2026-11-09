@@ -39,10 +39,12 @@ if is_gpu():
     y_test = to_gpu(y_test)
 
 model = Sequential(
-    Conv2d(1, 16, 3, pad=1),
+    # dilation=2 -> effective 5x5 kernel; pad=2 keeps the spatial size,
+    # so the Linear input size below (32 * 7 * 7) is unchanged.
+    Conv2d(1, 16, 3, pad=2, dilation=2),
     ReLU(),
     MaxPool2d(2),
-    Conv2d(16, 32, 3, pad=1),
+    Conv2d(16, 32, 3, pad=2, dilation=2),
     ReLU(),
     MaxPool2d(2),
     Flatten(),
@@ -85,6 +87,7 @@ for epoch in range(max_epoch):
                 f"time: {time.time() - start_time:.2f}s"
             )
 
+    avg_loss = sum_loss / count
     sum_acc = 0.0
     count = 0
     with test_mode(), no_grad():
@@ -95,7 +98,7 @@ for epoch in range(max_epoch):
             sum_acc += float(acc) * len(t)
             count += len(t)
     print(
-        f"epoch: {epoch + 1}, loss: {sum_loss / count:.4f}, "
+        f"epoch: {epoch + 1}, loss: {avg_loss:.4f}, "
         f"test acc: {sum_acc / count:.4f}, "
         f"time: {time.time() - start_time:.2f}s"
     )
