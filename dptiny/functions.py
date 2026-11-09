@@ -296,7 +296,7 @@ class GetItem(Function):
         return x[self.slices]
 
     def backward(self, gy):
-        return GetItemGrad(self.slices, self.x_shape)(gy)
+        return GetItemGrad(self.slices, self.x_shape)(gy).data
 
 
 class GetItemGrad(Function):
@@ -500,79 +500,160 @@ class Conv2d(Function):
     Weight shape: ``(OC, C, KH, KW)``
     Output shape: ``(N, OC, OH, OW)``
 
-    Only ``stride`` and ``pad`` are supported; dilation and groups are not.
+    Supports stride, padding, and dilation.
     """
 
     def __init__(
         self,
         stride: Union[int, Tuple[int, int]] = 1,
         pad: Union[int, Tuple[int, int]] = 0,
+        dilation: Union[int, Tuple[int, int]] = 1,
     ):
         super().__init__()
+
         self.stride = utils.pair(stride)
         self.pad = utils.pair(pad)
+        self.dilation = utils.pair(dilation)
+
+        SH, SW = self.stride
+        PH, PW = self.pad
+        DH, DW = self.dilation
+
+        if SH < 1 or SW < 1:
+            raise ValueError("stride must be >= 1")
+
+        if PH < 0 or PW < 0:
+            raise ValueError("pad must be >= 0")
+
+        if DH < 1 or DW < 1:
+            raise ValueError("dilation must be >= 1")
 
     def forward(self, x, W):
         N, C, H, W_in = x.shape
         OC, C2, KH, KW = W.shape
+
         if C != C2:
             raise ValueError(
                 f"Input channels {C} do not match weight channels {C2}"
             )
+
         SH, SW = self.stride
         PH, PW = self.pad
+        DH, DW = self.dilation
 
-        OH = (H + 2 * PH - KH) // SH + 1
-        OW = (W_in + 2 * PW - KW) // SW + 1
+        # Effective kernel size after dilation.
+        effective_KH = (KH - 1) * DH + 1
+        effective_KW = (KW - 1) * DW + 1
 
+        padded_H = H + 2 * PH
+        padded_W = W_in + 2 * PW
+
+        # The effective kernel must fit inside the padded input.
+        if effective_KH > padded_H or effective_KW > padded_W:
+            raise ValueError(
+                "Effective kernel size does not fit inside "
+                "the padded input."
+            )
+
+        # Output dimensions.
+        OH = (padded_H - effective_KH) // SH + 1
+        OW = (padded_W - effective_KW) // SW + 1
+
+        # Pad the input.
         x_padded = (
-            xp.pad(x, ((0, 0), (0, 0), (PH, PH), (PW, PW)), mode="constant")
+            xp.pad(
+                x,
+                ((0, 0), (0, 0), (PH, PH), (PW, PW)),
+                mode="constant",
+            )
             if PH > 0 or PW > 0
             else x
         )
 
-        # im2col via sliding windows; subsample for stride.
+        # Create sliding windows using the effective kernel size.
         patches = xp.lib.stride_tricks.sliding_window_view(
-            x_padded, (KH, KW), axis=(2, 3)
-        )[:, :, ::SH, ::SW, :, :]
-
-        # (N, C, OH, OW, KH, KW) -> (N*OH*OW, C*KH*KW)
-        col = patches.transpose(0, 2, 3, 1, 4, 5).reshape(
-            N * OH * OW, C * KH * KW
+            x_padded,
+            (effective_KH, effective_KW),
+            axis=(2, 3),
         )
+
+        # Apply convolution stride.
+        patches = patches[:, :, ::SH, ::SW, :, :]
+
+        # Select the kernel positions according to dilation.
+        patches = patches[:, :, :, :, ::DH, ::DW]
+
+        # (N, C, OH, OW, KH, KW)
+        # -> (N*OH*OW, C*KH*KW)
+        col = patches.transpose(
+            0, 2, 3, 1, 4, 5
+        ).reshape(
+            N * OH * OW,
+            C * KH * KW,
+        )
+
         W_col = W.reshape(OC, -1)
 
-        out = col @ W_col.T  # (N*OH*OW, OC)
-        out = out.reshape(N, OH, OW, OC).transpose(0, 3, 1, 2)
+        # Matrix multiplication performs the convolution.
+        out = col @ W_col.T
 
+        # (N*OH*OW, OC) -> (N, OC, OH, OW)
+        out = out.reshape(
+            N, OH, OW, OC
+        ).transpose(0, 3, 1, 2)
+
+        # Save values needed by backward().
         self.input_shape = x.shape
         self.col_shape = (N, OH, OW, C, KH, KW)
         self._col = col
+
         return out
 
     def backward(self, gy):
         x, W = self.inputs
+
         x_data = x.data
         W_data = W.data
+
         N, C, H, W_in = x_data.shape
         OC, _, KH, KW = W_data.shape
+
         SH, SW = self.stride
         PH, PW = self.pad
+        DH, DW = self.dilation
+
         N, OC, OH, OW = gy.shape
 
         W_col = W_data.reshape(OC, -1)
-        gy_col = gy.transpose(0, 2, 3, 1).reshape(N * OH * OW, OC)
 
-        # gW = gy_col.T @ col
+        gy_col = gy.transpose(
+            0, 2, 3, 1
+        ).reshape(
+            N * OH * OW,
+            OC,
+        )
+
+        # Gradient with respect to weights.
         gW_col = gy_col.T @ self._col
         gW = gW_col.reshape(OC, C, KH, KW)
 
-        # gx via col2im
-        gcol = gy_col @ W_col  # (N*OH*OW, C*KH*KW)
-        gcol = gcol.reshape(N, OH, OW, C, KH, KW).transpose(0, 3, 1, 2, 4, 5)
+        # Gradient with respect to input columns.
+        gcol = gy_col @ W_col
 
+        gcol = gcol.reshape(
+            N, OH, OW, C, KH, KW
+        ).transpose(
+            0, 3, 1, 2, 4, 5
+        )
+
+        # Allocate gradient for padded input.
         gx_padded = xp.zeros(
-            (N, C, H + 2 * PH, W_in + 2 * PW)
+            (
+                N,
+                C,
+                H + 2 * PH,
+                W_in + 2 * PW,
+            )
             if PH > 0 or PW > 0
             else (N, C, H, W_in),
             dtype=x_data.dtype,
@@ -585,13 +666,25 @@ class Conv2d(Function):
         kh_idx = xp.arange(KH).reshape(1, 1, 1, 1, KH, 1)
         kw_idx = xp.arange(KW).reshape(1, 1, 1, 1, 1, KW)
 
-        h_idx = oh_idx * SH + kh_idx
-        w_idx = ow_idx * SW + kw_idx
+        # Dilation controls the spacing between kernel elements.
+        h_idx = oh_idx * SH + kh_idx * DH
+        w_idx = ow_idx * SW + kw_idx * DW
 
-        xp.add.at(gx_padded, (n_idx, c_idx, h_idx, w_idx), gcol)
+        # Accumulate overlapping gradients.
+        xp.add.at(
+            gx_padded,
+            (n_idx, c_idx, h_idx, w_idx),
+            gcol,
+        )
 
+        # Remove padding from the input gradient.
         gx = (
-            gx_padded[:, :, PH : H + PH, PW : W_in + PW]
+            gx_padded[
+                :,
+                :,
+                PH : H + PH,
+                PW : W_in + PW,
+            ]
             if PH > 0 or PW > 0
             else gx_padded
         )
@@ -791,8 +884,13 @@ def batch_norm(
     return BatchNorm(momentum, eps)(x, gamma, beta, running_mean, running_var)
 
 
-def conv2d(x, W, stride=1, pad=0):
-    return Conv2d(stride=stride, pad=pad)(x, W)
+def conv2d(x, W, stride=1, pad=0, dilation=1):
+    """2-D convolution with optional dilation."""
+    return Conv2d(
+        stride=stride,
+        pad=pad,
+        dilation=dilation,
+    )(x, W)
 
 
 def max_pool2d(x, kernel_size, stride=None, pad=0):
