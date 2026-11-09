@@ -39,10 +39,12 @@ if is_gpu():
     y_test = to_gpu(y_test)
 
 model = Sequential(
-    Conv2d(1, 16, 3, pad=1),
+    # dilation=2 -> effective 5x5 kernel; pad=2 keeps the spatial size,
+    # so the Linear input size below (32 * 7 * 7) is unchanged.
+    Conv2d(1, 16, 3, pad=2, dilation=2),
     ReLU(),
     MaxPool2d(2),
-    Conv2d(16, 32, 3, pad=1),
+    Conv2d(16, 32, 3, pad=2, dilation=2),
     ReLU(),
     MaxPool2d(2),
     Flatten(),

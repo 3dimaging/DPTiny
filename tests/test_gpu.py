@@ -79,3 +79,28 @@ def test_variable_to_gpu_and_back(gpu):
     assert dptiny.is_gpu()
     x.to_cpu()
     assert isinstance(x.data, np.ndarray)
+
+
+def test_dilated_conv2d_gpu_matches_cpu(gpu):
+    rng = np.random.default_rng(0)
+    x_np = rng.standard_normal((2, 3, 11, 12)).astype(np.float32)
+    w_np = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
+    kw = dict(stride=(2, 1), pad=(2, 1), dilation=(2, 3))
+
+    dptiny.use_cpu()
+    x = Variable(x_np.copy())
+    w = Variable(w_np.copy())
+    y = dptiny.conv2d(x, w, **kw)
+    y.sum().backward()
+    gx_cpu, gw_cpu = x.grad.copy(), w.grad.copy()
+    y_cpu = y.data.copy()
+
+    dptiny.use_gpu()
+    xg = Variable(xp.asarray(x_np))
+    wg = Variable(xp.asarray(w_np))
+    yg = dptiny.conv2d(xg, wg, **kw)
+    yg.sum().backward()
+
+    assert np.allclose(dptiny.to_cpu(yg.data), y_cpu, atol=1e-4)
+    assert np.allclose(dptiny.to_cpu(xg.grad), gx_cpu, atol=1e-4)
+    assert np.allclose(dptiny.to_cpu(wg.grad), gw_cpu, atol=1e-4)
